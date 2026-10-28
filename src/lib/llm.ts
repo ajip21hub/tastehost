@@ -6,6 +6,7 @@ import "server-only";
  * - Anthropic Messages API
  * Configure with LLM_PROVIDER + LLM_API_KEY (+ optional LLM_MODEL, LLM_BASE_URL),
  * or just set one of the well-known vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, GROQ_API_KEY, XAI_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY).
+ * LLM_MODEL may be a comma-separated list; later entries are fallbacks tried on 404/429/5xx/timeout.
  * No key => the agent runs in deterministic mode (same Qloo tools, template explanations).
  */
 
@@ -16,11 +17,18 @@ const PRESETS: Record<Exclude<Provider, "custom">, { env: string; baseUrl: strin
   anthropic: { env: "ANTHROPIC_API_KEY", baseUrl: "https://api.anthropic.com/v1", model: "claude-haiku-4-5" },
   groq: { env: "GROQ_API_KEY", baseUrl: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile" },
   xai: { env: "XAI_API_KEY", baseUrl: "https://api.x.ai/v1", model: "grok-3-mini" },
-  gemini: { env: "GEMINI_API_KEY", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-2.5-flash" },
+  gemini: { env: "GEMINI_API_KEY", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", // Verified 28 Oct 2026: tool calling works on these; 2.5 is closed to new keys, 3.7/3.8/flash-latest often 503.
+    // Free tier is ~5 requests/min PER MODEL, so the fallback chain also spreads quota across models.
+    model: "gemini-3.5-flash-lite,gemini-3.5-flash,gemini-3.1-flash-lite,gemini-3.6-flash" },
   openrouter: { env: "OPENROUTER_API_KEY", baseUrl: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini" },
 };
 
-export interface LlmConfig { provider: Provider; apiKey: string; model: string; baseUrl: string }
+export interface LlmConfig { provider: Provider; apiKey: string; model: string; fallbacks: string[]; baseUrl: string }
+
+function withModels(provider: Provider, apiKey: string, baseUrl: string, modelSpec: string): LlmConfig {
+  const models = modelSpec.split(",").map((m) => m.trim()).filter(Boolean);
+  return { provider, apiKey, baseUrl, model: models[0], fallbacks: models.slice(1) };
+}
 
 export function llmConfig(): LlmConfig | null {
   const explicit = process.env.LLM_PROVIDER as Provider | undefined;
@@ -29,12 +37,12 @@ export function llmConfig(): LlmConfig | null {
     const apiKey = process.env.LLM_API_KEY || (preset ? process.env[preset.env] : undefined);
     const baseUrl = process.env.LLM_BASE_URL || preset?.baseUrl;
     const model = process.env.LLM_MODEL || preset?.model;
-    if (apiKey && baseUrl && model) return { provider: explicit, apiKey, baseUrl, model };
+    if (apiKey && baseUrl && model) return withModels(explicit, apiKey, baseUrl, model);
     return null;
   }
   for (const [provider, p] of Object.entries(PRESETS) as [Exclude<Provider, "custom">, (typeof PRESETS)["openai"]][]) {
     const apiKey = process.env[p.env];
-    if (apiKey) return { provider, apiKey, baseUrl: process.env.LLM_BASE_URL || p.baseUrl, model: process.env.LLM_MODEL || p.model };
+    if (apiKey) return withModels(provider, apiKey, process.env.LLM_BASE_URL || p.baseUrl, process.env.LLM_MODEL || p.model);
   }
   return null;
 }
@@ -46,9 +54,9 @@ export type Msg =
   | { role: "assistant"; content: string; toolCalls?: ToolCall[] }
   | { role: "tool"; toolCallId: string; name: string; content: string };
 
-export interface ChatResult { text: string; toolCalls: ToolCall[] }
+export interface ChatResult { text: string; toolCalls: ToolCall[]; model?: string }
 
-const TIMEOUT = Number(process.env.LLM_TIMEOUT_MS || 30000);
+const TIMEOUT = Number(process.env.LLM_TIMEOUT_MS || 20000);
 
 function safeParse(s: unknown): Record<string, unknown> {
   if (s && typeof s === "object") return s as Record<string, unknown>;
@@ -132,10 +140,47 @@ async function anthropicChat(cfg: LlmConfig, messages: Msg[], tools: ToolDef[], 
   };
 }
 
-export async function chat(cfg: LlmConfig, messages: Msg[], tools: ToolDef[] = [], maxTokens = 1200): Promise<ChatResult> {
-  return cfg.provider === "anthropic" ? anthropicChat(cfg, messages, tools, maxTokens) : openaiChat(cfg, messages, tools, maxTokens);
+/** Last model that answered, per provider — tried first next time (keeps a conversation on one model). */
+const preferred = new Map<Provider, string>();
+
+function retryable(err: unknown) {
+  const e = err as Error;
+  if (e?.name === "TimeoutError" || e?.name === "AbortError") return true;
+  const code = Number(/HTTP (\d+)/.exec(e?.message || "")?.[1]);
+  return code === 404 || code === 408 || code === 429 || code >= 500;
+}
+
+export async function chat(
+  cfg: LlmConfig, messages: Msg[], tools: ToolDef[] = [], maxTokens = 1200, opts: { sticky?: boolean } = {},
+): Promise<ChatResult> {
+  const sticky = opts.sticky ?? true;
+  const all = [cfg.model, ...cfg.fallbacks];
+  const pref = sticky ? preferred.get(cfg.provider) : undefined;
+  const order = pref && all.includes(pref) ? [pref, ...all.filter((m) => m !== pref)] : all;
+  let lastErr: unknown;
+  for (const model of order) {
+    const c = { ...cfg, model };
+    try {
+      const r = cfg.provider === "anthropic" ? await anthropicChat(c, messages, tools, maxTokens) : await openaiChat(c, messages, tools, maxTokens);
+      if (sticky) preferred.set(cfg.provider, model);
+      return { ...r, model };
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[tastehost] LLM model ${model} failed: ${(err as Error).message.slice(0, 120)}`);
+      if (!retryable(err)) break;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("LLM failed");
 }
 
 export function llmLabel(cfg: LlmConfig | null) {
-  return cfg ? `${cfg.provider} · ${cfg.model}` : "deterministic (no LLM key)";
+  if (!cfg) return "deterministic (no LLM key)";
+  const active = preferred.get(cfg.provider) || cfg.model;
+  return `${cfg.provider} · ${active}${cfg.fallbacks.length ? ` (+${cfg.fallbacks.length} fallback${cfg.fallbacks.length > 1 ? "s" : ""})` : ""}`;
+}
+
+/** Same config but starting from the last fallback model — used for side calls so they don't eat the main model's quota. */
+export function reversedModels(cfg: LlmConfig): LlmConfig {
+  const all = [cfg.model, ...cfg.fallbacks].reverse();
+  return { ...cfg, model: all[0], fallbacks: all.slice(1) };
 }

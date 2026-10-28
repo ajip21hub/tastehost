@@ -250,7 +250,7 @@ export default function Planner() {
               )}
               {done && (
                 <p className="mt-3 text-[11px] text-stone-500">
-                  Done in {(done.ms / 1000).toFixed(1)}s · {done.mode === "llm" ? "LLM tool-calling loop" : "deterministic planner"} · Qloo calls: {done.qlooCalls.live} live, {done.qlooCalls.cache} cached, {done.qlooCalls.fallback} sample
+                  Done in {(done.ms / 1000).toFixed(1)}s · {done.mode === "llm" ? `LLM tool-calling loop (${done.llmTurns} turns${done.model ? `, ${done.model}` : ""})` : "deterministic planner"} · Qloo calls: {done.qlooCalls.live} live, {done.qlooCalls.cache} cached, {done.qlooCalls.fallback} sample
                 </p>
               )}
             </div>

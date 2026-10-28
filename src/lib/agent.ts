@@ -1,7 +1,7 @@
 import "server-only";
 import { ALL_CATEGORIES, CATEGORIES, isCategory } from "./categories";
 import { genericPlan } from "./fallback";
-import { chat, llmConfig, llmLabel, type LlmConfig, type Msg, type ToolDef } from "./llm";
+import { chat, llmConfig, llmLabel, reversedModels, type LlmConfig, type Msg, type ToolDef } from "./llm";
 import { buildPlan, rankCategory, resolveMembers, sharedTaste } from "./planner";
 import { newCounter, qlooConfigured } from "./qloo";
 import type { AgentEvent, CategoryKey, PlanRequest, ResolvedMember, ScoredPlace } from "./types";
@@ -111,11 +111,12 @@ export async function runAgent(req: PlanRequest, emit: Emit) {
   const genericPromise = (async () => {
     if (!cfg) return emit({ type: "generic", text: genericPlan(req.city).join("\n"), source: "static" });
     try {
-      const r = await chat(cfg, [
+      const r = await chat(reversedModels(cfg), [
         { role: "system", content: "You are a generic travel assistant with no access to taste data. Be brief." },
-        { role: "user", content: `Plan a ${req.occasion} in ${req.city} for: ${req.members.map((m) => `${m.name} (likes ${m.loves.join(", ")})`).join("; ")}. Give 3-4 numbered stops, one line each, no intro.` },
-      ], [], 300);
-      emit({ type: "generic", text: r.text.trim(), source: "llm" });
+        { role: "user", content: `Plan a ${req.occasion} in ${req.city} for: ${req.members.map((m) => `${m.name} (likes ${m.loves.join(", ")})`).join("; ")}. Give 3-4 numbered stops, one short line each, plain text (no markdown), no intro.` },
+      ], [], 1500, { sticky: false });
+      const text = r.text.replace(/\*\*/g, "").trim();
+      emit({ type: "generic", text: text || genericPlan(req.city).join("\n"), source: text ? "llm" : "static" });
     } catch {
       emit({ type: "generic", text: genericPlan(req.city).join("\n"), source: "static" });
     }
@@ -123,16 +124,16 @@ export async function runAgent(req: PlanRequest, emit: Emit) {
 
   let mode: "llm" | "deterministic" = "deterministic";
   let finalized = false;
+  const llmStats = { turns: 0, model: undefined as string | undefined };
 
   if (cfg) {
-    mode = "llm";
     try {
-      finalized = await llmLoop(cfg, req, categories, tools, state, emit);
+      finalized = await llmLoop(cfg, req, categories, tools, state, emit, llmStats);
+      if (finalized) mode = "llm";
     } catch (err) {
       console.error("[tastehost] LLM failed:", (err as Error).message);
       const code = /HTTP (\d+)/.exec((err as Error).message)?.[1];
       emit({ type: "thought", text: `LLM unavailable${code ? ` (HTTP ${code})` : ""}; finishing with the deterministic planner.` });
-      mode = "deterministic";
     }
   }
 
@@ -144,7 +145,7 @@ export async function runAgent(req: PlanRequest, emit: Emit) {
   }
 
   await genericPromise;
-  emit({ type: "done", ms: Date.now() - t0, mode, qlooCalls: counter });
+  emit({ type: "done", ms: Date.now() - t0, mode, qlooCalls: counter, llmTurns: llmStats.turns, model: llmStats.model });
 }
 
 function pick(ranked: Partial<Record<CategoryKey, ScoredPlace[]>>, cats: CategoryKey[]) {
@@ -156,6 +157,7 @@ async function llmLoop(
   tools: { lookup_tastes: () => Promise<unknown>; find_shared_taste: () => Promise<unknown>; rank_places: (a: { category?: unknown }) => Promise<unknown> },
   state: { resolved: ResolvedMember[] | null; ranked: Partial<Record<CategoryKey, ScoredPlace[]>> },
   emit: Emit,
+  stats: { turns: number; model?: string },
 ): Promise<boolean> {
   const messages: Msg[] = [
     {
@@ -163,7 +165,7 @@ async function llmLoop(
       content:
         "You are TasteHost, an agent that plans group outings. You MUST ground every recommendation in Qloo taste-graph data via the tools. " +
         "Workflow: lookup_tastes -> find_shared_taste -> rank_places for each requested category -> finalize_plan. " +
-        "Prefer picks with high groupScore AND high fairness so nobody is left out. Per-member reasons must cite the tool data (ranks, matching tags). Be concise and warm.",
+        "Prefer picks with high groupScore AND high fairness so nobody is left out. Per-member reasons must be grounded in the tool data (their personal rank, matching taste tags) but written in plain friendly language — never quote raw decimal scores. Be concise and warm.",
     },
     {
       role: "user",
@@ -175,6 +177,8 @@ async function llmLoop(
   ];
   for (let i = 0; i < 9; i++) {
     const r = await chat(cfg, messages, TOOLS, 1500);
+    stats.turns++;
+    stats.model = r.model;
     if (r.text.trim()) emit({ type: "thought", text: r.text.trim().slice(0, 400) });
     if (!r.toolCalls.length) {
       messages.push({ role: "assistant", content: r.text || "" });

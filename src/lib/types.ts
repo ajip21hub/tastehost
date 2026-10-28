@@ -76,4 +76,4 @@ export type AgentEvent =
   | { type: "plan"; plan: Plan }
   | { type: "generic"; text: string; source: "llm" | "static" }
   | { type: "error"; message: string }
-  | { type: "done"; ms: number; mode: "llm" | "deterministic"; qlooCalls: Record<DataSource, number> };
+  | { type: "done"; ms: number; mode: "llm" | "deterministic"; qlooCalls: Record<DataSource, number>; llmTurns?: number; model?: string };
