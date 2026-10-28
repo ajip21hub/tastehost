@@ -189,7 +189,7 @@ export function buildPlan(args: {
     picks.push({
       category: cat, place,
       why: choice?.why || det.why,
-      perMember: { ...det.perMember, ...(choice?.perMember || {}) },
+      perMember: mergeReasons(det.perMember, choice?.perMember),
       status,
     });
   }
@@ -206,4 +206,21 @@ export function buildPlan(args: {
       Object.entries(args.ranked).map(([k, v]) => [k, (v || []).filter((p) => !picks.some((x) => x.place.id === p.id)).slice(0, 3)]),
     ),
   };
+}
+
+/**
+ * Per-member reasons always start with our computed, Qloo-grounded rank; the LLM's wording is appended only
+ * after stripping any rank claims it made (it sometimes invents "#21 of 40").
+ */
+function mergeReasons(det: Record<string, string>, llm?: Record<string, string>) {
+  const out: Record<string, string> = {};
+  for (const [name, base] of Object.entries(det)) {
+    const extra = (llm?.[name] || "")
+      .replace(/(ranked\s+)?#\d+\s*(of\s*\d+)?(\s+for\s+fans\s+of\s+[^,.;]+)?[,.;:]?\s*/gi, "")
+      .replace(/(just\s+)?outside\s+(their|the)\s+top\s+\d+[^,.;]*[,.;:]?\s*/gi, "")
+      .replace(/^(and|with|,|;|-|—)\s*/i, "")
+      .trim();
+    out[name] = extra && extra.length > 8 && !base.includes("matches their taste") ? `${base} — ${extra.charAt(0).toLowerCase()}${extra.slice(1)}` : base;
+  }
+  return out;
 }

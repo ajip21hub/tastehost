@@ -133,7 +133,7 @@ export default function Planner() {
 
       <div className="grid gap-6 lg:grid-cols-[380px_1fr]">
         {/* ---------- left: the group ---------- */}
-        <section className="h-fit rounded-2xl border border-stone-800 bg-stone-900/60 p-5">
+        <section className="h-fit min-w-0 rounded-2xl border border-stone-800 bg-stone-900/60 p-5">
           <div className="grid grid-cols-2 gap-3">
             <label className="text-xs text-stone-400">City
               <input value={city} onChange={(e) => setCity(e.target.value)}
@@ -201,7 +201,7 @@ export default function Planner() {
         </section>
 
         {/* ---------- right: agent + plan ---------- */}
-        <section className="space-y-6">
+        <section className="min-w-0 space-y-6">
           {error && <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-200">{error}</div>}
 
           {(steps.length > 0 || running || done) && (

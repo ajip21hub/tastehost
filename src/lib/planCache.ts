@@ -14,6 +14,7 @@ export interface CachedRun { events: AgentEvent[]; createdAt: number }
 
 export function planKey(req: PlanRequest) {
   const norm = {
+    v: 2, // bump when plan format/scoring changes so stale plans aren't served
     city: req.city.trim().toLowerCase(),
     occasion: req.occasion.trim().toLowerCase(),
     categories: [...req.categories].sort(),
