@@ -1,4 +1,4 @@
-// Usage: node scripts/smoke.mjs [jakarta|bandung] [baseUrl]
+// Usage: node scripts/smoke.mjs [jakarta|bandung|yogya] [baseUrl] [--fresh]
 const presets = {
   jakarta: { city: "Jakarta", occasion: "Friday night out", categories: ["dining", "culture", "nightlife"], members: [
     { name: "Aji", loves: ["Radiohead", "Studio Ghibli", "ramen"] },
@@ -9,11 +9,14 @@ const presets = {
     { name: "Budi", loves: ["Manchester United", "Fast & Furious"] },
     { name: "Lia", loves: ["BTS", "Crash Landing on You"] },
     { name: "Tom", loves: ["Anthony Bourdain", "The Bear"] } ] },
+  yogya: { city: "Yogyakarta", occasion: "Date night", categories: ["dining", "coffee", "culture"], members: [
+    { name: "Nadia", loves: ["Coldplay", "Before Sunrise", "gudeg"] },
+    { name: "Fajar", loves: ["Pamungkas", "La La Land", "kopi tubruk"] } ] },
 };
 const name = process.argv[2] || "jakarta";
 const base = process.argv[3] || "http://localhost:3000";
 const t0 = Date.now();
-const res = await fetch(`${base}/api/plan`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(presets[name]) });
+const res = await fetch(`${base}/api/plan`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...presets[name], fresh: process.argv.includes("--fresh") }) });
 if (!res.ok) { console.error("HTTP", res.status, await res.text()); process.exit(1); }
 const text = await res.text();
 for (const line of text.split("\n").filter(Boolean)) {

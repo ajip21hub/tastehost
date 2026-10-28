@@ -4,6 +4,7 @@ import { genericPlan } from "./fallback";
 import { chat, llmConfig, llmLabel, reversedModels, type LlmConfig, type Msg, type ToolDef } from "./llm";
 import { buildPlan, rankCategory, resolveMembers, sharedTaste } from "./planner";
 import { newCounter, qlooConfigured } from "./qloo";
+import { getCachedRun, planKey, putCachedRun } from "./planCache";
 import type { AgentEvent, CategoryKey, PlanRequest, ResolvedMember, ScoredPlace } from "./types";
 
 type Emit = (e: AgentEvent) => void;
@@ -65,7 +66,7 @@ function compactPlaces(list: ScoredPlace[]) {
   }));
 }
 
-export async function runAgent(req: PlanRequest, emit: Emit) {
+async function runAgentLive(req: PlanRequest, emit: Emit, onBusy?: () => Promise<boolean>) {
   const t0 = Date.now();
   const counter = newCounter();
   const cfg = llmConfig();
@@ -129,19 +130,31 @@ export async function runAgent(req: PlanRequest, emit: Emit) {
   let mode: "llm" | "deterministic" = "deterministic";
   let finalized = false;
   const llmStats = { turns: 0, model: undefined as string | undefined };
+  let llmFailed = false;
 
   if (cfg) {
     try {
       finalized = await llmLoop(cfg, req, categories, tools, state, emit, llmStats);
       if (finalized) mode = "llm";
     } catch (err) {
+      llmFailed = true;
       console.error("[tastehost] LLM failed:", (err as Error).message);
       const code = /HTTP (\d+)/.exec((err as Error).message)?.[1];
-      emit({ type: "thought", text: `LLM unavailable${code ? ` (HTTP ${code})` : ""}; finishing with the deterministic planner.` });
+      // AI busy: prefer an earlier AI plan for this exact group over a rule-based one.
+      if (onBusy) {
+        await genericPromise;
+        if (await onBusy()) return;
+      }
+      emit({
+        type: "notice", level: "warn",
+        text: `AI busy${code === "429" ? " (rate limit)" : code ? ` (HTTP ${code})` : ""} — using the rule-based plan built from the same Qloo data.`,
+      });
     }
   }
 
   if (!finalized) {
+    if (cfg && !llmFailed)
+      emit({ type: "notice", level: "warn", text: "AI didn't finish the plan — completing it with the rule-based planner." });
     if (!state.resolved) await tools.lookup_tastes();
     await tools.find_shared_taste();
     for (const c of categories) if (!state.ranked[c]) await tools.rank_places({ category: c });
@@ -219,4 +232,59 @@ async function llmLoop(
     }
   }
   return false;
+}
+
+/**
+ * Entry point: serve a cached AI plan for an identical group instantly (unless re-planning or fresh=true),
+ * otherwise run the agent live and cache the result when the AI loop completed it.
+ */
+export async function runAgent(req: PlanRequest, emit: Emit) {
+  const t0 = Date.now();
+  const key = planKey(req);
+  const cacheable = !req.previousPickIds?.length && !req.changeNote;
+  if (cacheable && !req.fresh) {
+    const hit = await getCachedRun(key);
+    if (hit) {
+      for (const e of hit.events) {
+        if (e.type === "done") {
+          emit({ ...e, mode: "cached", cachedMode: "llm", cachedAt: hit.createdAt, ms: Date.now() - t0, qlooCalls: newCounter() });
+        } else if (e.type === "step") {
+          emit({ ...e, source: e.source ? "cache" : undefined, ms: 0 });
+        } else if (e.type !== "thought" && e.type !== "notice") {
+          emit(e);
+        }
+      }
+      return;
+    }
+  }
+  const recorded: AgentEvent[] = [];
+  const onBusy = async () => {
+    if (!cacheable) return false;
+    const hit = await getCachedRun(key);
+    if (!hit) return false;
+    emit({ type: "notice", level: "warn", text: "AI busy — showing the cached AI plan for this exact group." });
+    for (const e of hit.events) {
+      if (e.type === "plan") emit(e);
+      if (e.type === "done") emit({ ...e, mode: "cached", cachedMode: "llm", cachedAt: hit.createdAt, ms: Date.now() - t0, qlooCalls: newCounter() });
+    }
+    return true;
+  };
+  await runAgentLive(req, (e) => {
+    recorded.push(e);
+    emit(e);
+  }, onBusy);
+  const done = recorded.find((e) => e.type === "done");
+  if (cacheable && done?.type === "done" && done.mode === "llm" && recorded.some((e) => e.type === "plan")) {
+    await putCachedRun(key, { events: recorded, createdAt: Date.now() });
+  }
+}
+
+/** Warm the plan cache for a request without streaming (used by /api/warm for the preset demo groups). */
+export async function warmPlan(req: PlanRequest): Promise<"cached" | "warmed" | "rule-only"> {
+  if (await getCachedRun(planKey(req))) return "cached";
+  let mode: string | undefined;
+  await runAgent(req, (e) => {
+    if (e.type === "done") mode = e.mode;
+  });
+  return mode === "llm" ? "warmed" : "rule-only";
 }

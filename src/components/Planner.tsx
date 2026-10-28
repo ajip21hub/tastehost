@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
+import { PRESETS } from "@/lib/presets";
 import type { AgentEvent, CategoryKey, Member, Plan } from "@/lib/types";
 
 const CATS: { key: CategoryKey; label: string; emoji: string }[] = [
@@ -8,32 +9,6 @@ const CATS: { key: CategoryKey; label: string; emoji: string }[] = [
   { key: "coffee", label: "Coffee & dessert", emoji: "☕" },
   { key: "culture", label: "Culture & activity", emoji: "🎨" },
   { key: "nightlife", label: "Music & nightlife", emoji: "🎶" },
-];
-
-const PRESETS: { label: string; city: string; occasion: string; members: Member[]; categories: CategoryKey[] }[] = [
-  {
-    label: "Friday night, Jakarta",
-    city: "Jakarta",
-    occasion: "Friday night out",
-    categories: ["dining", "culture", "nightlife"],
-    members: [
-      { name: "Aji", loves: ["Radiohead", "Studio Ghibli", "ramen"] },
-      { name: "Dina", loves: ["Taylor Swift", "Gilmore Girls", "matcha"] },
-      { name: "Raka", loves: ["Hindia", "Interstellar", "sate padang"] },
-    ],
-  },
-  {
-    label: "Team offsite, Bandung",
-    city: "Bandung",
-    occasion: "Team offsite",
-    categories: ["dining", "coffee", "culture"],
-    members: [
-      { name: "Sari", loves: ["Norah Jones", "Haruki Murakami"] },
-      { name: "Budi", loves: ["Manchester United", "Fast & Furious"] },
-      { name: "Lia", loves: ["BTS", "Crash Landing on You"] },
-      { name: "Tom", loves: ["Anthony Bourdain", "The Bear"] },
-    ],
-  },
 ];
 
 type Step = Extract<AgentEvent, { type: "step" }>;
@@ -63,14 +38,19 @@ export default function Planner() {
   const [done, setDone] = useState<Done | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState<string[]>([]);
+  const [notices, setNotices] = useState<{ level: "info" | "warn"; text: string }[]>([]);
   const lastPlan = useRef<Plan | null>(null);
 
   const canRun = useMemo(() => city.trim() && members.some((m) => m.loves.some((l) => l.trim())) && categories.length > 0, [city, members, categories]);
 
+  type Inputs = { city: string; occasion: string; members: Member[]; categories: CategoryKey[] };
+
   function loadPreset(i: number) {
     const p = PRESETS[i];
     setCity(p.city); setOccasion(p.occasion); setMembers(p.members); setCategories(p.categories);
-    setPlan(null); lastPlan.current = null; setSteps([]); setThoughts([]); setGeneric(null); setDone(null); setDirty([]);
+    setDirty([]);
+    // One click: load the demo group and plan straight away (served instantly from the warmed cache).
+    void run(false, { city: p.city, occasion: p.occasion, members: p.members, categories: p.categories });
   }
 
   function updateMember(i: number, patch: Partial<Member>) {
@@ -78,8 +58,9 @@ export default function Planner() {
     if (lastPlan.current) setDirty((d) => (d.includes(members[i].name) ? d : [...d, members[i].name]));
   }
 
-  async function run(replan = false) {
-    setRunning(true); setError(null); setSteps([]); setThoughts([]); setGeneric(null); setDone(null);
+  async function run(replan = false, override?: Inputs, fresh = false) {
+    const inp: Inputs = override ?? { city, occasion, members, categories };
+    setRunning(true); setError(null); setSteps([]); setThoughts([]); setGeneric(null); setDone(null); setNotices([]);
     if (!replan) { setPlan(null); lastPlan.current = null; }
     const prev = replan ? lastPlan.current : null;
     try {
@@ -87,8 +68,8 @@ export default function Planner() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          city, occasion, categories,
-          members: members.map((m) => ({ name: m.name, loves: m.loves.filter((l) => l.trim()) })),
+          city: inp.city, occasion: inp.occasion, categories: inp.categories, fresh,
+          members: inp.members.map((m) => ({ name: m.name, loves: m.loves.filter((l) => l.trim()) })),
           previousPickIds: prev?.picks.map((p) => p.place.id),
           changeNote: prev ? `${dirty.join(", ") || "Someone"} changed their preferences; keep good picks, swap what no longer fits.` : undefined,
         }),
@@ -116,6 +97,7 @@ export default function Planner() {
           else if (ev.type === "plan") { setPlan(ev.plan); lastPlan.current = ev.plan; }
           else if (ev.type === "generic") setGeneric({ text: ev.text, source: ev.source });
           else if (ev.type === "done") setDone(ev);
+          else if (ev.type === "notice") setNotices((n) => [...n, { level: ev.level, text: ev.text }]);
           else if (ev.type === "error") setError(ev.message);
         }
       }
@@ -143,7 +125,7 @@ export default function Planner() {
           {PRESETS.map((p, i) => (
             <button key={p.label} onClick={() => loadPreset(i)} disabled={running}
               className="rounded-full border border-stone-700 px-3 py-1.5 text-stone-300 hover:border-amber-400 hover:text-amber-200">
-              Demo: {p.label}
+              ⚡ {p.label}
             </button>
           ))}
         </div>
@@ -222,7 +204,7 @@ export default function Planner() {
         <section className="space-y-6">
           {error && <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-200">{error}</div>}
 
-          {(steps.length > 0 || running) && (
+          {(steps.length > 0 || running || done) && (
             <div className="rounded-2xl border border-stone-800 bg-stone-900/60 p-5">
               <h2 className="text-sm font-semibold text-stone-200">Agent at work</h2>
               <ol className="mt-3 space-y-2">
@@ -249,10 +231,35 @@ export default function Planner() {
                 </details>
               )}
               {done && (
-                <p className="mt-3 text-[11px] text-stone-500">
-                  Done in {(done.ms / 1000).toFixed(1)}s · {done.mode === "llm" ? `LLM tool-calling loop (${done.llmTurns} turns${done.model ? `, ${done.model}` : ""})` : "deterministic planner"} · Qloo calls: {done.qlooCalls.live} live, {done.qlooCalls.cache} cached, {done.qlooCalls.fallback} sample
-                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-stone-500">
+                  {done.mode === "cached" && (
+                    <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-sky-200 ring-1 ring-sky-500/30">
+                      ⚡ Cached AI plan · made {new Date(done.cachedAt ?? Date.now()).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
+                    </span>
+                  )}
+                  {done.mode === "llm" && (
+                    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-200 ring-1 ring-emerald-500/30">
+                      🤖 AI plan · {done.llmTurns} tool-calling turns{done.model ? ` · ${done.model}` : ""}
+                    </span>
+                  )}
+                  {done.mode === "deterministic" && (
+                    <span className={`rounded-full px-2 py-0.5 ring-1 ${notices.some((n) => n.level === "warn") ? "bg-amber-500/15 text-amber-200 ring-amber-500/30" : "bg-stone-800 text-stone-300 ring-stone-700"}`}>
+                      {notices.some((n) => n.level === "warn") ? "⚠️ AI busy · rule-based plan" : "Rule-based plan"}
+                    </span>
+                  )}
+                  <span>
+                    {(done.ms / 1000).toFixed(1)}s · Qloo calls: {done.qlooCalls.live} live, {done.qlooCalls.cache} cached, {done.qlooCalls.fallback} sample
+                  </span>
+                  {done.mode === "cached" && !running && (
+                    <button onClick={() => run(false, undefined, true)} className="text-amber-300 underline-offset-2 hover:underline">
+                      run the agent live instead
+                    </button>
+                  )}
+                </div>
               )}
+              {notices.map((n, i) => (
+                <p key={i} className={`mt-2 rounded-lg px-3 py-2 text-xs ${n.level === "warn" ? "bg-amber-500/10 text-amber-200" : "bg-stone-800 text-stone-300"}`}>{n.text}</p>
+              ))}
             </div>
           )}
 

@@ -69,6 +69,8 @@ export interface PlanRequest {
   categories: CategoryKey[];
   previousPickIds?: string[];
   changeNote?: string;
+  /** Skip the plan cache and run the agent live. */
+  fresh?: boolean;
 }
 
 export type AgentEvent =
@@ -78,4 +80,8 @@ export type AgentEvent =
   | { type: "plan"; plan: Plan }
   | { type: "generic"; text: string; source: "llm" | "static" }
   | { type: "error"; message: string }
-  | { type: "done"; ms: number; mode: "llm" | "deterministic"; qlooCalls: Record<DataSource, number>; llmTurns?: number; model?: string };
+  | { type: "notice"; level: "info" | "warn"; text: string }
+  | {
+      type: "done"; ms: number; mode: "llm" | "deterministic" | "cached"; qlooCalls: Record<DataSource, number>;
+      llmTurns?: number; model?: string; cachedAt?: number; cachedMode?: "llm";
+    };

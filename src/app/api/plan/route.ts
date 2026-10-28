@@ -33,6 +33,7 @@ function parse(body: unknown): PlanRequest | string {
     occasion: str(b.occasion, 60) || "Group outing",
     previousPickIds: (Array.isArray(b.previousPickIds) ? b.previousPickIds : []).map((x: unknown) => str(x, 80)).filter(Boolean).slice(0, 8),
     changeNote: str(b.changeNote, 200) || undefined,
+    fresh: b.fresh === true,
   };
 }
 
