@@ -59,6 +59,7 @@ const TOOLS: ToolDef[] = [
 function compactPlaces(list: ScoredPlace[]) {
   return list.slice(0, 6).map((p) => ({
     place_id: p.id, name: p.name, groupScore: p.groupScore, fairness: p.fairness, rating: p.rating, price_level: p.priceLevel,
+    left_out: p.leftOut,
     tags: p.tags.slice(0, 6),
     member_fit: Object.fromEntries(Object.entries(p.memberFit).map(([n, f]) => [n, { score: f.score, reasons: f.reasons }])),
   }));
@@ -79,7 +80,10 @@ export async function runAgent(req: PlanRequest, emit: Emit) {
       const s = Date.now();
       const { resolved, source } = await resolveMembers(req.members, counter, req.city);
       state.resolved = resolved;
-      const detail = resolved.map((m) => `${m.name}: ${m.entities.map((e) => e.name).join(", ") || "—"}`).join(" · ");
+      const missed = resolved.flatMap((m) => m.entities.filter((e) => e.type === "sample").map((e) => e.name));
+      const detail =
+        resolved.map((m) => `${m.name}: ${m.entities.map((e) => e.name).join(", ") || "—"}`).join(" · ") +
+        (missed.length ? ` · Qloo lookup failed for: ${missed.join(", ")} (using sample tags)` : "");
       emit({ type: "step", id: ++stepId, tool: "lookup_tastes", label: "Looked up everyone's favourites in Qloo's taste graph", detail, source, ms: Date.now() - s });
       return resolved.map((m) => ({ member: m.name, entities: m.entities.map((e) => ({ name: e.name, type: e.type.replace("urn:entity:", ""), tags: e.tags.slice(0, 6) })), not_found: m.unresolved }));
     },
@@ -165,7 +169,7 @@ async function llmLoop(
       content:
         "You are TasteHost, an agent that plans group outings. You MUST ground every recommendation in Qloo taste-graph data via the tools. " +
         "Workflow: lookup_tastes -> find_shared_taste -> rank_places for each requested category -> finalize_plan. " +
-        "Prefer picks with high groupScore AND high fairness so nobody is left out. Each per-member reason MUST cite that person's Qloo rank from rank_places (e.g. '#3 of 25 for fans of Radiohead') and, if present, a matching taste tag, in plain friendly language — never quote raw decimal scores. Be concise and warm.",
+        "Prefer picks with high groupScore AND high fairness; never pick a place whose left_out list is non-empty if another candidate has an empty one. Each per-member reason MUST cite that person's Qloo rank from rank_places (e.g. '#3 of 25 for fans of Radiohead') and, if present, a matching taste tag, in plain friendly language — never quote raw decimal scores. Be concise and warm.",
     },
     {
       role: "user",

@@ -284,6 +284,7 @@ export default function Planner() {
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
+                          {(p.place.leftOut?.length ?? 0) > 0 && <span title="No place in this category is in everyone's personal top list; this one keeps the least-happy person closest." className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] text-amber-200">compromise pick</span>}
                           {p.status && <span className={`rounded-full px-2 py-0.5 text-[10px] ${p.status === "new" ? "bg-fuchsia-500/20 text-fuchsia-200" : "bg-stone-800 text-stone-400"}`}>{p.status === "new" ? "new after re-plan" : "kept"}</span>}
                           <div className="text-right">
                             <div className="text-xl font-bold text-amber-300">{Math.round(p.place.groupScore * 100)}%</div>

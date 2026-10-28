@@ -40,7 +40,9 @@ export interface ScoredPlace extends Place {
   category: CategoryKey;
   groupScore: number;
   fairness: number;
-  memberFit: Record<string, { score: number; reasons: string[] }>;
+  memberFit: Record<string, { score: number; reasons: string[]; rank?: number; of?: number }>;
+  /** Members for whom this place is outside their top two-thirds (or not in their Qloo list at all). */
+  leftOut: string[];
 }
 
 export interface PlanPick {

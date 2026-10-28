@@ -7,7 +7,8 @@ import type { CategoryKey, DataSource, Place, TasteEntity } from "./types";
 const BASE = (process.env.QLOO_API_URL || "https://hackathon.api.qloo.com").replace(/\/$/, "");
 const FRESH_MS = 1000 * 60 * 60 * 24; // 24h
 const STALE_MS = 1000 * 60 * 60 * 24 * 30; // serve stale cache up to 30 days if Qloo is down
-const TIMEOUT_MS = Number(process.env.QLOO_TIMEOUT_MS || 9000);
+const TIMEOUT_MS = Number(process.env.QLOO_TIMEOUT_MS || 12000);
+const ATTEMPTS = 3;
 
 export function qlooConfigured() {
   return Boolean(process.env.QLOO_API_KEY);
@@ -25,20 +26,30 @@ async function qlooGet(pathname: string, params: Record<string, string>): Promis
   if (fresh) return { data: fresh.value, source: "cache" };
 
   if (qlooConfigured()) {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    const what = `${pathname} ${params.query ?? params["filter.tags"] ?? ""}`.slice(0, 80);
+    for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+      let waitMs = 500 * 2 ** attempt + Math.floor(Math.random() * 250);
       try {
         const res = await fetch(`${BASE}${pathname}?${qs}`, {
           headers: { "X-Api-Key": process.env.QLOO_API_KEY as string, accept: "application/json" },
           signal: AbortSignal.timeout(TIMEOUT_MS),
           cache: "no-store",
         });
-        if (res.status === 429 || res.status >= 500) throw new Error(`qloo ${res.status}`);
-        if (!res.ok) break; // 4xx: don't retry
+        if (res.status === 429 || res.status >= 500) {
+          const ra = Number(res.headers.get("retry-after"));
+          if (ra > 0) waitMs = Math.min(3000, ra * 1000);
+          throw new Error(`HTTP ${res.status}`);
+        }
+        if (!res.ok) {
+          console.warn(`[qloo] ${what} -> HTTP ${res.status} (not retried)`);
+          break;
+        }
         const data = (await res.json()) as Json;
         await cacheSet(cacheKey, data);
         return { data, source: "live" };
-      } catch {
-        if (attempt === 0) await new Promise((r) => setTimeout(r, 400));
+      } catch (err) {
+        console.warn(`[qloo] ${what} attempt ${attempt + 1}/${ATTEMPTS} failed: ${(err as Error).name === "TimeoutError" ? "timeout" : (err as Error).message}`);
+        if (attempt < ATTEMPTS - 1) await new Promise((r) => setTimeout(r, waitMs));
       }
     }
   }
@@ -100,7 +111,8 @@ interface RawEntity {
 }
 
 export async function searchEntity(query: string, counter?: Counter, city?: string): Promise<{ entity: TasteEntity | null; source: DataSource }> {
-  const q = query.trim();
+  // Normalise: collapse whitespace, strip surrounding quotes/punctuation, lowercase for the cache key.
+  const q = query.replace(/\s+/g, " ").replace(/^["'“”‘’.,;:!?\s]+|["'“”‘’.,;:!?\s]+$/g, "").trim().toLowerCase();
   if (!q) return { entity: null, source: "fallback" };
   const { data, source } = await qlooGet("/search", { query: q, take: "6" });
   const results = (data?.results as RawEntity[] | undefined) || null;
@@ -173,4 +185,26 @@ export async function recommendPlaces(
       })),
     source,
   };
+}
+
+
+/**
+ * Affinity of one person's taste profile for specific place IDs (Insights + filter.results.entities).
+ * Used to compare places that fall outside someone's personal top list.
+ */
+export async function affinityFor(signalIds: string[], placeIds: string[], counter?: Counter): Promise<Map<string, number>> {
+  const real = signalIds.filter((id) => !id.startsWith("sample:"));
+  const ids = placeIds.filter((id) => !id.startsWith("sample:")).slice(0, 25);
+  const out = new Map<string, number>();
+  if (!real.length || !ids.length) return out;
+  const { data, source } = await qlooGet("/v2/insights", {
+    "filter.type": "urn:entity:place",
+    "filter.results.entities": ids.join(","),
+    "signal.interests.entities": real.join(","),
+    take: String(ids.length),
+  });
+  if (counter) counter[data ? source : "fallback"]++;
+  const ents = ((data?.results as Json | undefined)?.entities as RawEntity[] | undefined) || [];
+  for (const e of ents) if (e.entity_id && typeof e.query?.affinity === "number") out.set(e.entity_id, e.query.affinity);
+  return out;
 }
