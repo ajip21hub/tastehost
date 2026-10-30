@@ -6,6 +6,8 @@
 
 ## Inspiration
 
+TasteHost is a new project, built from scratch during the Qloo Agentic Hackathon submission period.
+
 Every group chat has the same problem. Someone asks "where should we go Friday?", five people reply "anything is fine",
 and you end up at the same mall again. Even when it goes well, it's usually the loudest person's favourite spot.
 Planning for a group means taking taste seriously: not just what's popular, but what *each* person would enjoy, and
@@ -105,7 +107,7 @@ All Qloo calls run server-side. The key never reaches the browser, and Qloo resp
 ## Built with
 
 `qloo` · `qloo-insights-api` · `next.js` · `react` · `typescript` · `tailwindcss` · `vercel` · `gemini` ·
-`llm-tool-calling` · `ai-agents` · `node.js`
+`llm-tool-calling` · `ai-agents` · `node.js` · `Claude (AI coding assistant)`
 
 ## Testing instructions for judges
 
